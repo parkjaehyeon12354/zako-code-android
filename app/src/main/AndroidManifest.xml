@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Termux 에 명령을 보내는 권한. Termux 가 정의하고, 사용자가 허용한다 -->
+    <uses-permission android:name="com.termux.permission.RUN_COMMAND" />
+
+    <!-- 안드로이드 11 부터 다른 앱이 깔려 있는지 보려면 적어 둬야 한다 -->
+    <queries>
+        <package android:name="com.termux" />
+    </queries>
+
+    <!-- allowBackup=false: 키가 구글 백업으로 올라가지 않게.
+         cleartext: 집 안의 http://192.168... 같은 로컬 모델 서버도 보낼 곳으로 쓸 수 있게 (PC 판과 같음) -->
+    <application
+        android:allowBackup="false"
+        android:icon="@mipmap/ic_launcher"
+        android:label="Zako Code"
+        android:theme="@android:style/Theme.DeviceDefault.NoActionBar"
+        android:usesCleartextTraffic="true">
+
+        <activity
+            android:name=".MainActivity"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|uiMode"
+            android:exported="true"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

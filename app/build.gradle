@@ -1,0 +1,51 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'io.github.parkjaehyeon12354.zakocode'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'io.github.parkjaehyeon12354.zakocode'
+        minSdk 26
+        targetSdk 35
+        versionCode 1
+        versionName '1.0.0'
+    }
+
+    signingConfigs {
+        release {
+            // CI 가 레포 시크릿에서 풀어 경로를 넘긴다. 키가 바뀌면 폰에서 업데이트 설치가 막히니 같은 키를 계속 쓴다
+            def keystore = System.getenv('ZAKO_KEYSTORE')
+            if (keystore) {
+                storeFile file(keystore)
+                storePassword System.getenv('ZAKO_KEYSTORE_PASSWORD')
+                keyAlias 'zako'
+                keyPassword System.getenv('ZAKO_KEYSTORE_PASSWORD')
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig System.getenv('ZAKO_KEYSTORE') ? signingConfigs.release : null
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    buildFeatures {
+        buildConfig true
+    }
+}
+
+dependencies {
+    testImplementation 'junit:junit:4.13.2'
+    // 안드로이드 org.json 은 JVM 시험에서 빈 껍데기라 진짜를 넣는다
+    testImplementation 'org.json:json:20240303'
+}

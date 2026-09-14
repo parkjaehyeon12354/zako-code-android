@@ -1,0 +1,215 @@
+package io.github.parkjaehyeon12354.zakocode;
+
+import org.json.JSONArray;
+import org.json.JSONException;
+import org.json.JSONObject;
+
+import java.io.BufferedReader;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.io.OutputStream;
+import java.net.HttpURLConnection;
+import java.net.URI;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+/**
+ * 대화 + 명령 실행 반복. 안드로이드 API 를 쓰지 않아서 PC 의 JVM 에서 그대로 시험한다(AgentTest).
+ * AI 가 ```bash 블록을 내면 허락을 받아 실행하고, 결과를 AI 에게 돌려준다. 명령 없는 답이 올 때까지.
+ */
+final class Agent {
+    static final int MAX_STEPS = 20;      // 한 질문에 명령을 연달아 돌리는 상한 — 같은 명령을 끝없이 되풀이하는 모델이 있다
+    static final int OUT_LIMIT = 4000;    // AI 에게 돌려줄 출력 길이. 넘으면 뒤쪽만 (에러는 보통 끝에 있다)
+    static final Pattern FENCE = Pattern.compile("```(?:bash|sh|shell)[ \\t]*\\r?\\n(.*?)```", Pattern.DOTALL);
+
+    interface Shell {
+        Result run(String command) throws IOException, InterruptedException;
+    }
+
+    interface Approver {
+        boolean approve(String command) throws InterruptedException;
+    }
+
+    interface Output {
+        void text(String piece);
+
+        void ran(String command, Result result);   // 거절했으면 result 는 null
+    }
+
+    static final class Result {
+        final Integer exitCode;   // 시간이 지나 못 받았으면 null
+        final String output;
+
+        Result(Integer exitCode, String output) {
+            this.exitCode = exitCode;
+            this.output = output == null ? "" : output;
+        }
+    }
+
+    final String root, key, model;
+    private volatile HttpURLConnection current;
+
+    Agent(String root, String key, String model) {
+        this.root = root;
+        this.key = key;
+        this.model = model;
+    }
+
+    static JSONObject msg(String role, String content) {
+        try {
+            return new JSONObject().put("role", role).put("content", content);
+        } catch (JSONException e) {
+            throw new IllegalStateException(e);   // 이름이 null 일 때만 난다
+        }
+    }
+
+    static JSONArray newChat() {
+        return new JSONArray().put(msg("system", systemPrompt()));
+    }
+
+    static String systemPrompt() {
+        return "너는 Zako Code 다. 사용자의 안드로이드 폰 Termux 에서 명령을 직접 실행하며 일을 대신한다.\n"
+                + "- 명령이 필요하면 ```bash 코드 블록에 넣어라. 사용자가 허락하면 실제로 실행되고, 결과가 다음 메시지로 온다.\n"
+                + "- 실행하면 안 되는 예시 코드는 bash 로 표시하지 마라. python, text 처럼 다른 이름을 붙여라.\n"
+                + "- 블록마다 새 셸에서 실행된다. cd 는 다음 블록에 이어지지 않으니 `cd 폴더 && 명령` 처럼 한 블록에 써라.\n"
+                + "- 한 번에 한 단계씩 실행하고 결과를 보고 다음 명령을 정해라.\n"
+                + "- 입력을 기다리는 명령(vim, nano, 확인 질문)은 쓰지 마라. 설치 명령에는 -y 를 붙여라.\n"
+                + "- 일이 끝나면 bash 블록 없이 한국어로 짧게 결과를 알려라.\n"
+                + "- 시작 폴더: Termux 홈(~)";
+    }
+
+    static List<String> commands(String text) {
+        List<String> found = new ArrayList<>();
+        Matcher m = FENCE.matcher(text);
+        while (m.find()) {
+            String c = m.group(1).trim();
+            if (!c.isEmpty()) found.add(c);
+        }
+        return found;
+    }
+
+    /** 사용자 말을 붙인다. 마지막이 명령 결과(user)면 거기에 이어 쓴다 — user 가 두 번 연달아 가면 거부하는 모델이 있다. */
+    static void say(JSONArray messages, String text) {
+        JSONObject last = messages.optJSONObject(messages.length() - 1);
+        if (last != null && "user".equals(last.optString("role"))) {
+            try {
+                last.put("content", last.optString("content") + "\n\n" + text);
+            } catch (JSONException e) {
+                throw new IllegalStateException(e);
+            }
+        } else {
+            messages.put(msg("user", text));
+        }
+    }
+
+    void cancel() {
+        HttpURLConnection c = current;
+        if (c != null) c.disconnect();
+    }
+
+    List<String> models() throws IOException, JSONException {
+        HttpURLConnection c = open("/models", null);
+        JSONArray data = new JSONObject(read(c.getInputStream())).optJSONArray("data");
+        List<String> names = new ArrayList<>();
+        for (int i = 0; data != null && i < data.length(); i++) names.add(data.getJSONObject(i).getString("id"));
+        Collections.sort(names);
+        return names;
+    }
+
+    String chat(JSONArray messages, Output out) throws IOException, JSONException {
+        JSONObject body = new JSONObject()
+                .put("model", model)
+                .put("messages", messages)
+                .put("stream", true)
+                .put("stream_options", new JSONObject().put("include_usage", true));
+        HttpURLConnection c = open("/chat/completions", body);
+        StringBuilder reply = new StringBuilder();
+        long tokens = 0;
+        try (BufferedReader r = new BufferedReader(new InputStreamReader(c.getInputStream(), StandardCharsets.UTF_8))) {
+            for (String line; (line = r.readLine()) != null; ) {
+                line = line.trim();
+                if (!line.startsWith("data:")) continue;
+                String data = line.substring(5).trim();
+                if (data.equals("[DONE]")) break;
+                JSONObject chunk = new JSONObject(data);
+                JSONObject usage = chunk.optJSONObject("usage");
+                if (usage != null && usage.has("total_tokens")) tokens = usage.optLong("total_tokens");
+                JSONArray choices = chunk.optJSONArray("choices");   // 마지막 사용량 조각은 choices 가 비어 있다
+                if (choices == null || choices.length() == 0) continue;
+                JSONObject delta = choices.getJSONObject(0).optJSONObject("delta");
+                if (delta == null || delta.isNull("content")) continue;
+                String piece = delta.optString("content");
+                reply.append(piece);
+                out.text(piece);
+            }
+        }
+        if (tokens > 0) out.text(String.format("\n(토큰 %,d)", tokens));
+        return reply.toString();
+    }
+
+    void turn(JSONArray messages, Shell shell, Approver approver, Output out)
+            throws IOException, JSONException, InterruptedException {
+        for (int step = 0; step < MAX_STEPS; step++) {
+            String reply = chat(messages, out);
+            messages.put(msg("assistant", reply));
+            List<String> cmds = commands(reply);
+            if (cmds.isEmpty()) return;
+            StringBuilder results = new StringBuilder("명령 실행 결과:");
+            for (String cmd : cmds) {
+                if (Thread.interrupted()) throw new InterruptedException();
+                results.append("\n\n$ ").append(cmd).append('\n');
+                if (!approver.approve(cmd)) {
+                    out.ran(cmd, null);
+                    results.append("(사용자가 실행을 거절했다)");
+                    continue;
+                }
+                Result r = shell.run(cmd);
+                out.ran(cmd, r);
+                String o = r.output;
+                results.append("(종료 코드 ").append(r.exitCode == null ? "없음" : r.exitCode).append(")\n")
+                        .append(o.length() > OUT_LIMIT ? o.substring(o.length() - OUT_LIMIT) : o);
+            }
+            messages.put(msg("user", results.toString()));
+        }
+        out.text("\n명령을 " + MAX_STEPS + "번 연달아 돌려서 멈췄습니다. 이어가려면 \"계속\"이라고 보내세요.");
+    }
+
+    private HttpURLConnection open(String path, JSONObject body) throws IOException {
+        HttpURLConnection c = (HttpURLConnection) URI.create(root + path).toURL().openConnection();
+        current = c;
+        c.setConnectTimeout(30_000);
+        c.setReadTimeout(300_000);
+        c.setRequestProperty("Authorization", "Bearer " + key);
+        c.setRequestProperty("Content-Type", "application/json");
+        c.setRequestProperty("Accept-Encoding", "identity");   // 압축하면 스트리밍 조각이 뭉쳐서 온다
+        c.setRequestProperty("User-Agent", "ZakoCode");
+        if (body != null) {
+            c.setDoOutput(true);
+            try (OutputStream o = c.getOutputStream()) {
+                o.write(body.toString().getBytes(StandardCharsets.UTF_8));
+            }
+        }
+        int code = c.getResponseCode();
+        if (code >= 400) {
+            String err = read(c.getErrorStream());
+            throw new IOException("서버 오류 " + code + ": " + err.substring(0, Math.min(500, err.length())));
+        }
+        return c;
+    }
+
+    static String read(InputStream in) throws IOException {
+        if (in == null) return "";
+        try (InputStream s = in) {
+            ByteArrayOutputStream b = new ByteArrayOutputStream();
+            byte[] buf = new byte[8192];
+            for (int n; (n = s.read(buf)) > 0; ) b.write(buf, 0, n);
+            return new String(b.toByteArray(), StandardCharsets.UTF_8);
+        }
+    }
+}

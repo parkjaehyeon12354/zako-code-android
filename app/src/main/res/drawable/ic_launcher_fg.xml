@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Z. 적응형 아이콘은 가운데 66dp 원만 확실히 보이므로 38~70 안에 그린다 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#261107"
+        android:pathData="M38,38h32v8l-21,16h21v8h-32v-8l21,-16h-21z" />
+</vector>

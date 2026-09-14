@@ -1,0 +1,9 @@
+.gradle/
+build/
+local.properties
+.idea/
+*.p12
+*.jks
+*.keystore
+termux.apk
+e2e/log.jsonl
