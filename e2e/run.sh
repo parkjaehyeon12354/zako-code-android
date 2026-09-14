@@ -47,6 +47,8 @@ cat e2e/log.jsonl || true
 
 [[ "$result" == *DONE* ]]
 echo "--- file made inside Termux home ---"
-adb shell run-as com.termux cat files/home/zako-e2e.txt | tee /dev/stderr | grep -q zako-e2e-ok
+made=$(adb shell run-as com.termux cat files/home/zako-e2e.txt)
+echo "$made"
+[[ "$made" == *zako-e2e-ok* ]]
 python3 e2e/check.py e2e/log.jsonl
 echo "E2E OK"
