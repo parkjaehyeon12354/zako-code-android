@@ -241,11 +241,12 @@ public class AgentTest {
     public void textAfterUnansweredResultsJoinsTheLastUserMessage() throws Exception {
         JSONArray m = chat();
         Agent.say(m, "계속");
-        assertEquals(2, m.length());
-        assertEquals("hi\n\n계속", m.getJSONObject(1).getString("content"));
+        assertEquals(1, m.length());
+        assertEquals("hi\n\n계속", m.getJSONObject(0).getString("content"));
 
         m.put(Agent.msg("assistant", "네"));
         Agent.say(m, "다음");
-        assertEquals(4, m.length());
+        assertEquals(3, m.length());
+        assertTrue(m.getJSONObject(2).getLong("at") > 0);
     }
 }
