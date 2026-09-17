@@ -47,10 +47,14 @@ shot() { sleep "$1"; adb exec-out screencap -p > "screens/$2.png"; }
 shot 3 1-chat
 adb shell am start -S -n "$PKG/.MainActivity"
 shot 5 2-dashboard
+adb shell input tap 84 165   # 개요 옆 "모델" 탭 (320x640 기본 에뮬레이터 기준, 빗나가도 사진만 달라진다)
+shot 2 2b-dashboard-models
 adb shell am start -S -n "$PKG/.MainActivity" --es e2e_screen drawer
 shot 5 3-drawer
 adb shell am start -S -n "$PKG/.MainActivity" --es e2e_screen settings
 shot 5 4-settings
+adb shell am start -S -n "$PKG/.MainActivity" --es e2e_screen settings-about
+shot 5 5-settings-about
 adb shell am force-stop "$PKG"
 echo "--- logcat (termux / zako) ---"
 adb logcat -d | grep -i -E 'termux|zako|AndroidRuntime' | tail -60 || true

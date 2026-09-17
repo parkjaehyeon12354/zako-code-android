@@ -120,8 +120,10 @@ public class MainActivity extends Activity {
                 choose("e2e/model");
                 start(new Agent(i.getStringExtra("e2e_root"), "e2e-key", "e2e/model"), i.getStringExtra("e2e_prompt"), true);
             }
-            if ("settings".equals(i.getStringExtra("e2e_screen"))) openSettings();
-            if ("drawer".equals(i.getStringExtra("e2e_screen"))) openDrawer();
+            String screen = String.valueOf(i.getStringExtra("e2e_screen"));   // 화면 사진용
+            if (screen.equals("drawer")) openDrawer();
+            if (screen.startsWith("settings")) openSettings();
+            if (screen.equals("settings-about")) showSection(2);
         }
     }
 
@@ -749,12 +751,14 @@ public class MainActivity extends Activity {
             int n = i;
             Button b = button(names[i], BG, 0, USER_FG, 8, v -> showSection(n));
             b.setTextSize(13);
-            nav.addView(b, lp(WRAP, dp(36), 0, 0, 4, 0));
+            b.setPadding(dp(9), 0, dp(9), 0);   // 320dp 폰에서도 네 칸이 한 줄에 들어가게
+            nav.addView(b, lp(WRAP, dp(36), 0, 0, 2, 0));
             navs.add(b);
         }
         // 사용 설명서는 칸이 아니라 구글 문서를 연다
         Button guide = button("사용 설명서", BG, 0, USER_FG, 8, v -> open(GUIDE));
         guide.setTextSize(13);
+        guide.setPadding(dp(9), 0, dp(9), 0);
         nav.addView(guide, lp(WRAP, dp(36), 0, 0, 0, 0));
         HorizontalScrollView navScroll = new HorizontalScrollView(this);
         navScroll.setHorizontalScrollBarEnabled(false);
@@ -771,7 +775,7 @@ public class MainActivity extends Activity {
         sheet.addView(body);
 
         FrameLayout.LayoutParams at = new FrameLayout.LayoutParams(MATCH, WRAP, Gravity.CENTER);
-        at.leftMargin = at.rightMargin = dp(16);
+        at.leftMargin = at.rightMargin = dp(12);
         layer.addView(sheet, at);
         return layer;
     }
