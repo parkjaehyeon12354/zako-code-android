@@ -16,6 +16,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Locale;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -27,6 +28,18 @@ final class Agent {
     static final int MAX_STEPS = 20;      // 한 질문에 명령을 연달아 돌리는 상한 — 같은 명령을 끝없이 되풀이하는 모델이 있다
     static final int OUT_LIMIT = 4000;    // AI 에게 돌려줄 출력 길이. 넘으면 뒤쪽만 (에러는 보통 끝에 있다)
     static final Pattern FENCE = Pattern.compile("```(?:bash|sh|shell)[ \\t]*\\r?\\n(.*?)```", Pattern.DOTALL);
+    static final String RESULTS = "명령 실행 결과:";
+    static final String STEPS_NOTE = "명령을 " + MAX_STEPS + "번 연달아 돌려서 멈췄습니다. 이어가려면 \"계속\"이라고 보내세요.";
+
+    // 목록에는 채팅이 안 되는 모델이 섞여 있다. /models 가 용도를 알려주지 않아 이름으로 거른다 (PC 판과 같은 패턴)
+    static final Pattern NOT_CHAT = Pattern.compile("(embed|retriev|rerank|reward|guard|content-safety|nvclip|deplot|parse|detector)",
+            Pattern.CASE_INSENSITIVE);
+    // 알파벳순 첫 항목은 기본값으로 나쁘다. 사고 토큰 문제가 없는 평범한 instruct 를 먼저 본다
+    static final String[] PREFER = {
+            "nvidia/llama-3.1-nemotron-70b-instruct",
+            "mistralai/mistral-large-2-instruct",
+            "mistralai/codestral-22b-instruct-v0.1",
+    };
 
     interface Shell {
         Result run(String command) throws IOException, InterruptedException;
@@ -52,6 +65,16 @@ final class Agent {
         }
     }
 
+    static final class Reply {
+        final String text;
+        final long tokens;   // 서버가 알려준 usage.total_tokens — 모르면 0
+
+        Reply(String text, long tokens) {
+            this.text = text;
+            this.tokens = tokens;
+        }
+    }
+
     final String root, key, model;
     private volatile HttpURLConnection current;
 
@@ -69,12 +92,29 @@ final class Agent {
         }
     }
 
-    static JSONArray newChat() {
-        return new JSONArray().put(msg("system", systemPrompt()));
+    /** 대화에 남기는 메시지 — 보낸 시각을 붙인다. 서버로 갈 때는 role·content 만 추린다(request). */
+    static JSONObject stamped(String role, String content) {
+        try {
+            return msg(role, content).put("at", System.currentTimeMillis());
+        } catch (JSONException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    // 시스템 프롬프트는 대화에 저장하지 않고 보낼 때만 앞에 붙인다(PC 판과 같음).
+    // 모르는 필드(at·model·tokens)를 거부하는 깐깐한 OpenAI 호환 서버가 있어 role·content 만 보낸다.
+    static JSONArray request(JSONArray messages) {
+        JSONArray wire = new JSONArray().put(msg("system", systemPrompt()));
+        for (int i = 0; i < messages.length(); i++) {
+            JSONObject m = messages.optJSONObject(i);
+            if (m != null) wire.put(msg(m.optString("role"), m.optString("content")));
+        }
+        return wire;
     }
 
     static String systemPrompt() {
-        return "너는 Zako Code 다. 사용자의 안드로이드 폰 Termux 에서 명령을 직접 실행하며 일을 대신한다.\n"
+        return "너는 숙련된 개발자다. 코드는 반드시 언어를 명시한 코드펜스로 감싸고, 설명은 간결하게 한국어로 한다.\n"
+                + "너는 Zako Code 다. 사용자의 안드로이드 폰 Termux 에서 명령을 직접 실행하며 일을 대신한다.\n"
                 + "- 명령이 필요하면 ```bash 코드 블록에 넣어라. 사용자가 허락하면 실제로 실행되고, 결과가 다음 메시지로 온다.\n"
                 + "- 실행하면 안 되는 예시 코드는 bash 로 표시하지 마라. python, text 처럼 다른 이름을 붙여라.\n"
                 + "- 블록마다 새 셸에서 실행된다. cd 는 다음 블록에 이어지지 않으니 `cd 폴더 && 명령` 처럼 한 블록에 써라.\n"
@@ -94,6 +134,24 @@ final class Agent {
         return found;
     }
 
+    /** ``` 로만 나눈다(PC 판 Fences.Parse). 덩이마다 {언어, 글} — 설명 글이면 언어가 null. */
+    static List<String[]> fences(String text) {
+        String[] parts = text.split("```", -1);
+        List<String[]> blocks = new ArrayList<>();
+        for (int i = 0; i < parts.length; i++) {
+            String p = parts[i];
+            if (i % 2 == 0) {
+                String prose = p.replaceAll("\\A\n+|\n+\\z", "");
+                if (!prose.trim().isEmpty()) blocks.add(new String[]{null, prose});
+                continue;
+            }
+            int nl = p.indexOf('\n');
+            blocks.add(nl < 0 ? new String[]{"", p}
+                    : new String[]{p.substring(0, nl).trim().toLowerCase(Locale.ROOT), p.substring(nl + 1)});
+        }
+        return blocks;
+    }
+
     /** 사용자 말을 붙인다. 마지막이 명령 결과(user)면 거기에 이어 쓴다 — user 가 두 번 연달아 가면 거부하는 모델이 있다. */
     static void say(JSONArray messages, String text) {
         JSONObject last = messages.optJSONObject(messages.length() - 1);
@@ -104,8 +162,15 @@ final class Agent {
                 throw new IllegalStateException(e);
             }
         } else {
-            messages.put(msg("user", text));
+            messages.put(stamped("user", text));
         }
+    }
+
+    /** 고른 게 목록에 아직 있으면 그대로, 아니면 PREFER 순, 그래도 없으면 첫 항목. */
+    static String pickDefault(List<String> ids, String saved) {
+        if (ids.contains(saved)) return saved;
+        for (String p : PREFER) if (ids.contains(p)) return p;
+        return ids.isEmpty() ? "" : ids.get(0);
     }
 
     void cancel() {
@@ -117,15 +182,20 @@ final class Agent {
         HttpURLConnection c = open("/models", null);
         JSONArray data = new JSONObject(read(c.getInputStream())).optJSONArray("data");
         List<String> names = new ArrayList<>();
-        for (int i = 0; data != null && i < data.length(); i++) names.add(data.getJSONObject(i).getString("id"));
-        Collections.sort(names);
+        for (int i = 0; data != null && i < data.length(); i++) {
+            String id = data.getJSONObject(i).optString("id");
+            if (!id.isEmpty() && !NOT_CHAT.matcher(id).find()) names.add(id);
+        }
+        Collections.sort(names);   // String 비교는 글자 코드순 — PC 판 Ordinal 과 같다
         return names;
     }
 
-    String chat(JSONArray messages, Output out) throws IOException, JSONException {
+    Reply chat(JSONArray messages, Output out) throws IOException, JSONException {
         JSONObject body = new JSONObject()
                 .put("model", model)
-                .put("messages", messages)
+                .put("messages", request(messages))
+                .put("max_tokens", 4096)
+                .put("temperature", 0.4)
                 .put("stream", true)
                 .put("stream_options", new JSONObject().put("include_usage", true));
         HttpURLConnection c = open("/chat/completions", body);
@@ -149,18 +219,23 @@ final class Agent {
                 out.text(piece);
             }
         }
-        if (tokens > 0) out.text(String.format("\n(토큰 %,d)", tokens));
-        return reply.toString();
+        return new Reply(reply.toString(), tokens);
     }
 
-    void turn(JSONArray messages, Shell shell, Approver approver, Output out)
+    /**
+     * 명령 없는 답이 올 때까지 묻고 실행한다. 마지막 답을 돌려준다.
+     * 빈 답은 대화에 남기지 않는다 — 추론 모델이 max_tokens 를 사고에 다 쓰면 온다.
+     */
+    Reply turn(JSONArray messages, Shell shell, Approver approver, Output out)
             throws IOException, JSONException, InterruptedException {
+        Reply reply = null;
         for (int step = 0; step < MAX_STEPS; step++) {
-            String reply = chat(messages, out);
-            messages.put(msg("assistant", reply));
-            List<String> cmds = commands(reply);
-            if (cmds.isEmpty()) return;
-            StringBuilder results = new StringBuilder("명령 실행 결과:");
+            reply = chat(messages, out);
+            if (reply.text.trim().isEmpty()) return reply;
+            messages.put(stamped("assistant", reply.text).put("model", model).put("tokens", reply.tokens));
+            List<String> cmds = commands(reply.text);
+            if (cmds.isEmpty()) return reply;
+            StringBuilder results = new StringBuilder(RESULTS);
             for (String cmd : cmds) {
                 if (Thread.interrupted()) throw new InterruptedException();
                 results.append("\n\n$ ").append(cmd).append('\n');
@@ -175,9 +250,11 @@ final class Agent {
                 results.append("(종료 코드 ").append(r.exitCode == null ? "없음" : r.exitCode).append(")\n")
                         .append(o.length() > OUT_LIMIT ? o.substring(o.length() - OUT_LIMIT) : o);
             }
-            messages.put(msg("user", results.toString()));
+            // 명령 결과도 user 로 남긴다 — 다시 열어도 대화가 그대로 이어진다
+            messages.put(stamped("user", results.toString()));
         }
-        out.text("\n명령을 " + MAX_STEPS + "번 연달아 돌려서 멈췄습니다. 이어가려면 \"계속\"이라고 보내세요.");
+        out.text("\n" + STEPS_NOTE);
+        return reply;
     }
 
     private HttpURLConnection open(String path, JSONObject body) throws IOException {

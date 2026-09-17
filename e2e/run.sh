@@ -40,6 +40,18 @@ for i in $(seq 1 90); do
 done
 
 echo "--- app: ${result:-no result}"
+
+# 화면 사진 — 검사가 실패해도 무엇이 보였는지 남긴다 (CI 가 screens 로 올린다)
+mkdir -p screens
+shot() { sleep "$1"; adb exec-out screencap -p > "screens/$2.png"; }
+shot 3 1-chat
+adb shell am start -S -n "$PKG/.MainActivity"
+shot 5 2-dashboard
+adb shell am start -S -n "$PKG/.MainActivity" --es e2e_screen drawer
+shot 5 3-drawer
+adb shell am start -S -n "$PKG/.MainActivity" --es e2e_screen settings
+shot 5 4-settings
+adb shell am force-stop "$PKG"
 echo "--- logcat (termux / zako) ---"
 adb logcat -d | grep -i -E 'termux|zako|AndroidRuntime' | tail -60 || true
 echo "--- mock log ---"

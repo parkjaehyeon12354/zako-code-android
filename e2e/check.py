@@ -6,6 +6,11 @@ rows = [json.loads(line) for line in open(sys.argv[1], encoding='utf-8')]
 assert len(rows) == 2, f'요청 수 {len(rows)}'
 first, second = rows
 assert first['stream_options'] == {'include_usage': True}, first
+# 시스템 프롬프트는 보낼 때만 맨 앞에, 메시지에는 role·content 만 (시각·모델·토큰은 대화 파일에만)
+for row in rows:
+    assert row['messages'][0]['role'] == 'system', row['messages'][0]
+    for m in row['messages']:
+        assert set(m) == {'role', 'content'}, m
 back = second['messages'][-1]['content']
 assert 'zako-e2e-ok' in back and '종료 코드 0' in back, back
 print('서버가 받은 명령 결과:', back.replace('\n', ' | '))

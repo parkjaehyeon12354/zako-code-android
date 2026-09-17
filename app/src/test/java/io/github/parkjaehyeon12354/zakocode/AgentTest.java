@@ -75,14 +75,14 @@ public class AgentTest {
             String type, payload;
             if (request.startsWith("GET")) {
                 type = "application/json";
-                payload = "{\"data\":[{\"id\":\"b/model\"},{\"id\":\"a/model\"}]}";
+                payload = "{\"data\":[{\"id\":\"b/model\"},{\"id\":\"nv/NV-Embed-QA\"},{\"id\":\"a/model\"},{\"id\":\"x/llama-guard\"}]}";
             } else {
                 JSONObject json = new JSONObject(new String(body, StandardCharsets.UTF_8));
                 seen.add(new String[]{auth, json.toString()});
                 JSONArray msgs = json.getJSONArray("messages");
                 String last = msgs.getJSONObject(msgs.length() - 1).getString("content");
-                String text = last.startsWith("명령 실행 결과")
-                        ? "끝났습니다."
+                String text = last.startsWith("명령 실행 결과") ? "끝났습니다."
+                        : last.equals("빈 답") ? "     "
                         : "확인해 볼게요.\n```bash\necho zako-ok\n```\n```python\nprint(\"실행하면 안 됨\")\n```";
                 type = "text/event-stream";
                 payload = event(piece(text.substring(0, 5))) + event(piece(text.substring(5)))
@@ -128,7 +128,7 @@ public class AgentTest {
     }
 
     static JSONArray chat() {
-        return new JSONArray().put(Agent.msg("system", "s")).put(Agent.msg("user", "hi"));
+        return new JSONArray().put(Agent.stamped("user", "hi"));
     }
 
     static String lastContent(String body) throws Exception {
@@ -143,8 +143,38 @@ public class AgentTest {
     }
 
     @Test
-    public void modelsComeSorted() throws Exception {
+    public void modelsComeSortedWithoutNonChatModels() throws Exception {
         assertEquals(Arrays.asList("a/model", "b/model"), new Agent(root, "k", "").models());
+    }
+
+    @Test
+    public void defaultModelKeepsThePickThenPrefersThenFirst() {
+        List<String> ids = Arrays.asList("01-ai/yi-large", "mistralai/mistral-large-2-instruct", "z/m");
+        assertEquals("z/m", Agent.pickDefault(ids, "z/m"));
+        assertEquals("mistralai/mistral-large-2-instruct", Agent.pickDefault(ids, "gone/model"));
+        assertEquals("a", Agent.pickDefault(Arrays.asList("a", "b"), ""));
+        assertEquals("", Agent.pickDefault(Collections.emptyList(), ""));
+    }
+
+    @Test
+    public void fencesSplitLikeThePcVersion() {
+        List<String[]> b = Agent.fences("설명입니다.\n```html\n<b>hi</b>\n```\n뒤 설명.\n```Python\nprint(1)\n```");
+        assertEquals(4, b.size());
+        assertEquals(null, b.get(0)[0]);
+        assertEquals("설명입니다.", b.get(0)[1]);
+        assertEquals("html", b.get(1)[0]);
+        assertEquals("<b>hi</b>\n", b.get(1)[1]);
+        assertEquals("뒤 설명.", b.get(2)[1]);
+        assertEquals("python", b.get(3)[0]);
+        assertEquals(1, Agent.fences("```\n```").size());   // 빈 코드 블록도 블록이다
+    }
+
+    @Test
+    public void emptyReplyIsNotStored() throws Exception {
+        JSONArray m = new JSONArray().put(Agent.stamped("user", "빈 답"));
+        Agent.Reply r = new Agent(root, "k", "a/model").turn(m, cmd -> null, cmd -> true, new Screen());
+        assertTrue(r.text.trim().isEmpty());
+        assertEquals(1, m.length());
     }
 
     @Test
@@ -160,13 +190,35 @@ public class AgentTest {
         assertEquals(Collections.singletonList("echo zako-ok"), shellRan);
         assertEquals(2, seen.size());
         assertEquals("Bearer test-key", seen.get(0)[0]);
-        assertTrue(new JSONObject(seen.get(0)[1]).getJSONObject("stream_options").getBoolean("include_usage"));
+        JSONObject first = new JSONObject(seen.get(0)[1]);
+        assertTrue(first.getJSONObject("stream_options").getBoolean("include_usage"));
+        assertEquals(4096, first.getInt("max_tokens"));
         String back = lastContent(seen.get(1)[1]);
         assertTrue(back, back.contains("zako-ok") && back.contains("종료 코드 0"));
         assertFalse(back, back.contains("실행하면 안 됨"));
-        assertEquals("끝났습니다.", m.getJSONObject(m.length() - 1).getString("content"));
-        assertTrue(screen.text.toString(), screen.text.toString().contains("(토큰 42)"));
+
+        // 대화에는 시각·모델·토큰이 남고, 명령 결과는 user 로 남는다
+        assertEquals(4, m.length());
+        JSONObject reply = m.getJSONObject(1);
+        assertEquals("a/model", reply.getString("model"));
+        assertEquals(42, reply.getLong("tokens"));
+        assertTrue(reply.getLong("at") > 0);
+        assertEquals("user", m.getJSONObject(2).getString("role"));
+        assertTrue(m.getJSONObject(2).getString("content").startsWith(Agent.RESULTS));
+        assertEquals("끝났습니다.", m.getJSONObject(3).getString("content"));
+        assertFalse(screen.text.toString(), screen.text.toString().contains("토큰"));
         assertEquals(Collections.singletonList("echo zako-ok 0"), screen.ran);
+    }
+
+    @Test
+    public void requestHasSystemPromptFirstAndOnlyRoleAndContent() throws Exception {
+        new Agent(root, "k", "a/model").turn(chat(), cmd -> new Agent.Result(0, ""), cmd -> true, new Screen());
+        for (String[] s : seen) {
+            JSONArray msgs = new JSONObject(s[1]).getJSONArray("messages");
+            assertEquals("system", msgs.getJSONObject(0).getString("role"));
+            for (int i = 0; i < msgs.length(); i++) assertEquals(msgs.getJSONObject(i).toString(), 2, msgs.getJSONObject(i).length());
+        }
+        assertEquals(1, Agent.request(new JSONArray()).length());
     }
 
     @Test
